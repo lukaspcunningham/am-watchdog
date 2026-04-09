@@ -115,6 +115,27 @@ if page == "Portfolio Overview":
     st.markdown(f"## Portfolio Overview")
     st.caption(f"Reporting period: {latest_month} · {df_raw['Property'].nunique()} properties · {df_raw['PM_Company'].nunique()} PM companies")
 
+    with st.expander("ℹ️ About this tool · How to use it", expanded=False):
+        st.markdown("""
+**AM Watchdog** monitors utility billing across a multifamily portfolio and flags anomalies that may indicate PM overcharging, gradual billing drift, or maintenance issues — before they compound.
+
+**How it works:**
+Every property's utility charges are benchmarked against EIA Colorado market data on a seasonality-adjusted basis. Charges that deviate materially trigger a flag with an estimated dollar impact and, where warranted, a draft PM email for your review.
+
+**Three anomaly types detected:**
+- **Absolute overcharge** — billing consistently above market benchmark from the start of a period, suggesting a structural markup
+- **Drift** — charges trending upward month-over-month relative to the benchmark, suggesting gradual PM billing creep
+- **Maintenance signal** — sustained water usage above benchmark for 3+ months, consistent with an active plumbing issue rather than a billing error
+
+**Pages:**
+- **Portfolio Overview** — active flags across the portfolio with dollar impact and draft email support
+- **Property Deep Dive** — per-property utility trend charts with benchmark and budget overlays
+- **Acquisition DD** — screen T-12 utility data from an offering memorandum against current market benchmarks before close
+
+**Demo note:** This demo runs on a simulated 8-property Denver portfolio. Toggle off "Demo portfolio" in the sidebar to upload your own CSV data.
+        """)
+    st.markdown("")
+
     # Rate event banner
     for ev in get_rate_events(latest_month):
         st.markdown(f'<div class="rate-banner">📊 {ev["note"]}</div>', unsafe_allow_html=True)
