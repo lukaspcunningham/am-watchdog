@@ -103,7 +103,7 @@ Anomalies:
     lines = []
     for f in flags:
         lines.append(
-            f"  • {f['utility']}: ${f.get('per_unit',0):.0f}/unit billed vs. "
+            f"  • {f.get('Utility_Type', f.get('utility', ''))}: ${f.get('per_unit',0):.0f}/unit billed vs. "
             f"${f.get('eia_benchmark',0):.0f}/unit EIA benchmark "
             f"({f.get('ratio_to_eia',0):.1f}x) — est. annualized impact ${f.get('dollar_impact_annual',0):,.0f}"
         )
