@@ -132,7 +132,7 @@ Every property's utility charges are benchmarked against EIA Colorado market dat
 - **Property Deep Dive** — per-property utility trend charts with benchmark and budget overlays
 - **Acquisition DD** — screen T-12 utility data from an offering memorandum against current market benchmarks before close
 
-**Demo note:** This demo runs on a simulated 8-property Denver portfolio. Toggle off "Demo portfolio" in the sidebar to upload your own CSV data.
+**Demo note:** This is a proof of concept built on simulated data. A production implementation would be built around Tekton's specific PM reporting formats, chart of accounts, and data infrastructure. Toggle off "Demo portfolio" in the sidebar to upload your own CSV data.
         """)
     st.markdown("")
 
