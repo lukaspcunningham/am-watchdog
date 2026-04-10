@@ -94,6 +94,11 @@ with st.sidebar:
             st.stop()
 
     st.divider()
+    st.caption("DISPLAY")
+    norm_mode = st.radio("Normalize by", ["Per Unit", "Per Sq Ft"], horizontal=True)
+    use_sqft = (norm_mode == "Per Sq Ft")
+
+    st.divider()
     api_key = st.text_input("Anthropic API key", type="password",
                              help="Enables AI-generated summaries and email drafts")
     if api_key:
@@ -114,27 +119,6 @@ if page == "Portfolio Overview":
 
     st.markdown(f"## Portfolio Overview")
     st.caption(f"Reporting period: {latest_month} · {df_raw['Property'].nunique()} properties · {df_raw['PM_Company'].nunique()} PM companies")
-
-    with st.expander("ℹ️ About this tool · How to use it", expanded=False):
-        st.markdown("""
-**AM Watchdog** monitors utility billing across a multifamily portfolio and flags anomalies that may indicate PM overcharging, gradual billing drift, or maintenance issues — before they compound.
-
-**How it works:**
-Every property's utility charges are benchmarked against EIA Colorado market data on a seasonality-adjusted basis. Charges that deviate materially trigger a flag with an estimated dollar impact and, where warranted, a draft PM email for your review.
-
-**Three anomaly types detected:**
-- **Absolute overcharge** — billing consistently above market benchmark from the start of a period, suggesting a structural markup
-- **Drift** — charges trending upward month-over-month relative to the benchmark, suggesting gradual PM billing creep
-- **Maintenance signal** — sustained water usage above benchmark for 3+ months, consistent with an active plumbing issue rather than a billing error
-
-**Pages:**
-- **Portfolio Overview** — active flags across the portfolio with dollar impact and draft email support
-- **Property Deep Dive** — per-property utility trend charts with benchmark and budget overlays
-- **Acquisition DD** — screen T-12 utility data from an offering memorandum against current market benchmarks before close
-
-**Demo note:** This is a proof of concept built on simulated data. A production implementation would be built around Tekton's specific PM reporting formats, chart of accounts, and data infrastructure. Toggle off "Demo portfolio" in the sidebar to upload your own CSV data.
-        """)
-    st.markdown("")
 
     # Rate event banner
     for ev in get_rate_events(latest_month):
@@ -184,13 +168,18 @@ Every property's utility charges are benchmarked against EIA Colorado market dat
 
             narrative = generate_anomaly_narrative(row.to_dict())
 
+            if use_sqft and "per_sqft" in row and pd.notna(row.get("per_sqft")):
+                val_str   = f'${row["per_sqft"]:.3f}/sf billed vs. ${row["eia_bench_sqft"]:.3f}/sf EIA benchmark'
+            else:
+                val_str   = f'${row["per_unit"]:.0f}/unit billed vs. ${row["eia_benchmark"]:.0f}/unit EIA benchmark'
+
             st.markdown(
                 f'<div class="flag-card" style="border-color:{sc}">'
                 f'<div class="flag-prop">{row["Property"]} — {row["Utility_Type"]}</div>'
                 f'<div class="flag-meta">{row["PM_Company"]} · {row["Month"]}</div>'
                 f'<div style="margin-top:8px">{tag_html}</div>'
                 f'<div class="flag-detail">'
-                f'${row["per_unit"]:.0f}/unit billed vs. ${row["eia_benchmark"]:.0f}/unit EIA benchmark '
+                f'{val_str} '
                 f'({row["ratio_to_eia"]:.2f}x) &nbsp;·&nbsp; '
                 f'${row["dollar_impact_monthly"]:,.0f}/mo &nbsp;·&nbsp; '
                 f'${row["dollar_impact_annual"]:,.0f} annualized<br><br>'
@@ -216,20 +205,27 @@ Every property's utility charges are benchmarked against EIA Colorado market dat
     palette = ["#4a7ab5","#5aaa7a","#D4A843","#cc7755","#7a7ab5","#55aacc","#aa7755","#aaaaaa"]
     flagged_props = df_flagged["Property"].unique()
 
+    y_col   = "per_sqft" if (use_sqft and "per_sqft" in trend.columns) else "per_unit"
+    y_label = "$/sf/month" if use_sqft else "$/unit/month"
+
     for i, (prop, pdata) in enumerate(trend.groupby("Property")):
         pdata = pdata.sort_values("Month")
         is_flagged = prop in flagged_props
         fig.add_trace(go.Scatter(
-            x=pdata["Month"], y=pdata["per_unit"], name=prop,
+            x=pdata["Month"], y=pdata[y_col], name=prop,
             mode="lines+markers",
-            line=dict(color=palette[i % len(palette)], width=2.5 if is_flagged else 1.5,
-                      dash="solid"),
+            line=dict(color=palette[i % len(palette)], width=2.5 if is_flagged else 1.5),
             marker=dict(size=5 if is_flagged else 3),
             opacity=1.0 if is_flagged else 0.55,
         ))
 
     bench_months = sorted(trend["Month"].unique())
-    bench_vals   = [get_eia_benchmark(util_sel, int(m.split("-")[1])) for m in bench_months]
+    if use_sqft and "Avg_Unit_Sqft" in trend.columns:
+        avg_sf     = trend.groupby("Property")["Avg_Unit_Sqft"].first().mean()
+        bench_vals = [get_eia_benchmark(util_sel, int(m.split("-")[1])) / avg_sf for m in bench_months]
+    else:
+        bench_vals = [get_eia_benchmark(util_sel, int(m.split("-")[1])) for m in bench_months]
+
     fig.add_trace(go.Scatter(
         x=bench_months, y=bench_vals, name="EIA CO Benchmark",
         mode="lines", line=dict(color="#ffffff", width=1.5, dash="dash"), opacity=0.4,
@@ -240,7 +236,7 @@ Every property's utility charges are benchmarked against EIA Colorado market dat
         font=dict(color="#aaa", size=12),
         legend=dict(bgcolor="#1a1d27", bordercolor="#2a2d3a", borderwidth=1, font=dict(size=11)),
         xaxis=dict(gridcolor="#1e2030", title=None),
-        yaxis=dict(gridcolor="#1e2030", title="$/unit/month"),
+        yaxis=dict(gridcolor="#1e2030", title=y_label),
         height=340, margin=dict(l=0, r=0, t=10, b=0),
         hovermode="x unified",
     )
@@ -292,25 +288,30 @@ elif page == "Property Deep Dive":
             with ch_col:
                 fig2 = go.Figure()
 
-                # Actual line — color points by severity
+                d_y_col   = "per_sqft" if (use_sqft and "per_sqft" in udata.columns) else "per_unit"
+                d_y_label = "$/sf/month" if use_sqft else "$/unit/month"
                 point_colors = [severity_color(s) if pd.notna(s) else "#4a7ab5" for s in udata["severity"]]
                 fig2.add_trace(go.Scatter(
-                    x=udata["Month"], y=udata["per_unit"], name="Actual",
+                    x=udata["Month"], y=udata[d_y_col], name="Actual",
                     mode="lines+markers",
                     line=dict(color=line_color, width=2.5),
                     marker=dict(size=7, color=point_colors),
                 ))
 
-                # EIA benchmark
-                bench = [get_eia_benchmark(utility, int(m.split("-")[1])) for m in udata["Month"]]
+                avg_sf  = udata["Avg_Unit_Sqft"].iloc[0] if "Avg_Unit_Sqft" in udata.columns else 850
+                if use_sqft:
+                    bench = [get_eia_benchmark(utility, int(m.split("-")[1])) / avg_sf for m in udata["Month"]]
+                    bud_y = udata["budget_per_sqft"] if "budget_per_sqft" in udata.columns else udata["budget_per_unit"] / avg_sf
+                else:
+                    bench = [get_eia_benchmark(utility, int(m.split("-")[1])) for m in udata["Month"]]
+                    bud_y = udata["budget_per_unit"]
+
                 fig2.add_trace(go.Scatter(
                     x=udata["Month"], y=bench, name="EIA Benchmark",
                     mode="lines", line=dict(color="#fff", width=1.2, dash="dash"), opacity=0.35,
                 ))
-
-                # Budget line
                 fig2.add_trace(go.Scatter(
-                    x=udata["Month"], y=udata["budget_per_unit"], name="Underwritten Budget",
+                    x=udata["Month"], y=bud_y, name="Underwritten Budget",
                     mode="lines", line=dict(color="#5aaa7a", width=1.2, dash="dot"), opacity=0.5,
                 ))
 
@@ -319,15 +320,19 @@ elif page == "Property Deep Dive":
                     font=dict(color="#aaa", size=11),
                     legend=dict(bgcolor="#1a1d27", font=dict(size=10)),
                     xaxis=dict(gridcolor="#1e2030", title=None),
-                    yaxis=dict(gridcolor="#1e2030", title="$/unit/month"),
+                    yaxis=dict(gridcolor="#1e2030", title=d_y_label),
                     height=220, margin=dict(l=0, r=0, t=6, b=0),
                     hovermode="x unified",
                 )
                 st.plotly_chart(fig2, use_container_width=True)
 
             with st_col:
-                st.metric("Latest", f"${latest_u['per_unit']:.0f}/unit")
-                st.metric("EIA Benchmark", f"${latest_u['eia_benchmark']:.0f}/unit")
+                if use_sqft and "per_sqft" in latest_u:
+                    st.metric("Latest", f"${latest_u['per_sqft']:.3f}/sf")
+                    st.metric("EIA Benchmark", f"${latest_u['eia_bench_sqft']:.3f}/sf")
+                else:
+                    st.metric("Latest", f"${latest_u['per_unit']:.0f}/unit")
+                    st.metric("EIA Benchmark", f"${latest_u['eia_benchmark']:.0f}/unit")
                 ratio = latest_u["ratio_to_eia"]
                 delta_str = f"{(ratio-1)*100:+.0f}% vs EIA"
                 st.metric("Ratio", f"{ratio:.2f}x",

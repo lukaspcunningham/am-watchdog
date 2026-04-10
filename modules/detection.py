@@ -26,11 +26,17 @@ def compute_per_unit(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["Month_dt"]      = pd.to_datetime(df["Month"])
     df["month_num"]     = df["Month_dt"].dt.month
-    df["per_unit"]      = df["Total_Charge"] / df["Units"]
-    df["eia_benchmark"] = df.apply(lambda r: get_eia_benchmark(r["Utility_Type"], r["month_num"]), axis=1)
-    df["ratio_to_eia"]  = df["per_unit"] / df["eia_benchmark"].replace(0, np.nan)
+    df["per_unit"]        = df["Total_Charge"] / df["Units"]
+    df["eia_benchmark"]   = df.apply(lambda r: get_eia_benchmark(r["Utility_Type"], r["month_num"]), axis=1)
+    df["ratio_to_eia"]    = df["per_unit"] / df["eia_benchmark"].replace(0, np.nan)
     df["budget_per_unit"] = df["Underwritten_Budget"] / df["Units"]
-    df["vs_budget_pct"] = ((df["per_unit"] - df["budget_per_unit"]) / df["budget_per_unit"] * 100).round(1)
+    df["vs_budget_pct"]   = ((df["per_unit"] - df["budget_per_unit"]) / df["budget_per_unit"] * 100).round(1)
+    # Per sq ft metrics (requires Avg_Unit_Sqft column)
+    if "Avg_Unit_Sqft" in df.columns:
+        total_sqft          = df["Units"] * df["Avg_Unit_Sqft"]
+        df["per_sqft"]      = (df["Total_Charge"] / total_sqft).round(4)
+        df["eia_bench_sqft"]= (df["eia_benchmark"] / df["Avg_Unit_Sqft"]).round(4)
+        df["budget_per_sqft"]= (df["Underwritten_Budget"] / total_sqft).round(4)
     return df
 
 
