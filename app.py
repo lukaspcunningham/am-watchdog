@@ -73,9 +73,18 @@ SAMPLE_PATH = os.path.join(os.path.dirname(__file__), "data", "sample_data.csv")
 with st.sidebar:
     st.markdown("## AM Watchdog")
     st.caption("Utility Anomaly Detection")
+
+    # Investment thesis chip
+    st.markdown(
+        '<div style="background:#1a1d27;border:1px solid #2a2d3a;border-radius:6px;'
+        'padding:8px 12px;margin:6px 0 2px 0;font-size:0.72rem;color:#8aabcc;line-height:1.5">'
+        '<span style="color:#555;font-size:0.68rem;letter-spacing:0.8px">THESIS LENS</span><br>'
+        'Class B/C Value-Add · Denver<br>10–100 unit sub-institutional MF'
+        '</div>', unsafe_allow_html=True,
+    )
     st.divider()
 
-    page = st.radio("", ["Portfolio Overview", "Property Deep Dive", "Acquisition DD"],
+    page = st.radio("", ["Portfolio Overview", "Property Deep Dive", "Acquisition DD", "About the Build"],
                     label_visibility="collapsed")
 
     st.divider()
@@ -99,17 +108,31 @@ with st.sidebar:
     use_sqft = (norm_mode == "Per Sq Ft")
 
     st.divider()
+    st.caption("THESIS MODES")
+    oz_mode = st.toggle(
+        "Opportunity Zone asset", value=False,
+        help="Shows after-tax 10-year equity math in the Value-Add tab. "
+             "OZ investors forgive capital gains on appreciation at year 10.",
+    )
+    agency_mode = st.toggle(
+        "Agency debt (Fannie SBL)", value=True,
+        help="Adds DSCR qualifying check assuming 65% LTV, 5.5% coupon, 30-yr amort. "
+             "Fannie/Freddie SBL minimum DSCR is 1.25x.",
+    )
+
+    st.divider()
     api_key = st.text_input("Anthropic API key", type="password",
                              help="Enables AI-generated summaries and email drafts")
     if api_key:
         os.environ["ANTHROPIC_API_KEY"] = api_key
 
-df_analyzed  = run_analysis(df_raw)
-df_flagged   = get_flagged(df_analyzed)
-latest_month = df_analyzed["Month"].max()
-latest_flags = df_flagged[df_flagged["Month"] == latest_month].sort_values(
-    ["escalation_level", "dollar_impact_annual"], ascending=[False, False]
-)
+if page != "About the Build":
+    df_analyzed  = run_analysis(df_raw)
+    df_flagged   = get_flagged(df_analyzed)
+    latest_month = df_analyzed["Month"].max()
+    latest_flags = df_flagged[df_flagged["Month"] == latest_month].sort_values(
+        ["escalation_level", "dollar_impact_annual"], ascending=[False, False]
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -242,6 +265,37 @@ if page == "Portfolio Overview":
         hovermode="x unified",
     )
     st.plotly_chart(fig, use_container_width=True)
+
+    # ── PM Quality Signal ─────────────────────────────────────────────────────
+    st.markdown('<div class="section-title">PM Quality Signal</div>', unsafe_allow_html=True)
+    st.caption(
+        "In sub-institutional Class B/C, PM quality is the single strongest predictor of billing errors. "
+        "Flag rates across the portfolio reveal which PM companies are systematically overbilling vs. operating clean."
+    )
+
+    pm_stats = []
+    for pm_name in df_analyzed["PM_Company"].unique():
+        pm_data   = df_analyzed[df_analyzed["PM_Company"] == pm_name]
+        pm_latest = pm_data[pm_data["Month"] == latest_month]
+        n_props   = pm_data["Property"].nunique()
+        n_flagged = pm_latest[pm_latest["severity"].notna()]["Property"].nunique()
+        flag_rate = (n_flagged / n_props * 100) if n_props else 0
+        # Use corrected annualization: avg monthly impact × 12 across the PM's rows
+        avg_exp   = pm_data.groupby(["Property", "Utility_Type"])["dollar_impact_monthly"].mean().sum() * 12 / n_props if n_props else 0
+        pm_stats.append({
+            "PM Company": pm_name,
+            "Properties": n_props,
+            "Flagged (latest month)": n_flagged,
+            "Flag Rate": f"{flag_rate:.0f}%",
+            "Avg $ Exposure / Property / Yr": f"${avg_exp:,.0f}",
+            "_rate_val": flag_rate,
+        })
+    pm_df = pd.DataFrame(pm_stats).sort_values("_rate_val", ascending=False).drop(columns="_rate_val")
+    st.dataframe(pm_df, use_container_width=True, hide_index=True)
+    st.caption(
+        "_Once you've processed 10+ deals through Watchdog, this table becomes a preemptive screen — "
+        "when a new target shows up with a PM on the problem list, you enter DD with a different set of questions._"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -532,6 +586,113 @@ elif page == "Acquisition DD":
             st.plotly_chart(fig3, use_container_width=True)
             st.caption(f"Months above threshold: {n_fl}/{n_months}  ·  Annualized exposure: ${exp:,.0f}")
 
+    # ── RUBS Compliance Screen ────────────────────────────────────────────────
+    st.markdown('<div class="section-title">RUBS Compliance Screen — C.R.S. 38-12-901</div>', unsafe_allow_html=True)
+    st.caption(
+        "Colorado regulates how landlords can bill tenants for master-metered utilities. "
+        "Flagged utilities at sub-institutional MF are often the symptom of non-compliant RUBS allocation — "
+        "and the billing exposure transfers to the buyer at close. This screen lists what to investigate before LOI."
+    )
+
+    rubs_flags = []
+    elec_rec   = next((u for u in utility_summary if u["utility"] == "Electric"), None)
+    water_rec  = next((u for u in utility_summary if u["utility"] == "Water/Sewer"), None)
+    gas_rec    = next((u for u in utility_summary if u["utility"] == "Gas"), None)
+
+    if elec_rec and elec_rec["ratio"] > 1.25:
+        rubs_flags.append({
+            "severity": "HIGH",
+            "title":    "Electric allocation likely includes common-area load",
+            "detail":   f"At {elec_rec['ratio']:.2f}x EIA, the overage pattern is consistent with common-area lighting, "
+                        "pool/laundry equipment, or leasing office load being pushed into tenant RUBS allocation. "
+                        "Under C.R.S. 38-12-903, landlords cannot recover common-area utility costs from tenants. "
+                        "Exposure: tenant refund liability + potential tenant notice requirement.",
+            "action":   "Request itemized RUBS worksheet and master-meter invoice reconciliation.",
+        })
+    if water_rec and water_rec["months_flagged"] >= 3:
+        rubs_flags.append({
+            "severity": "HIGH",
+            "title":    "Water billing may omit vacancy credits",
+            "detail":   f"{water_rec['months_flagged']}/12 months flagged. Escalating pattern suggests either a "
+                        "physical leak (plumbing/irrigation) or vacant units not being credited out of the RUBS pool. "
+                        "Either way, occupied tenants are being overbilled. Irrigation on tenant allocation is "
+                        "specifically prohibited under C.R.S. 38-12-904(1)(c).",
+            "action":   "Verify vacancy credit methodology and irrigation metering separation.",
+        })
+    if gas_rec and gas_rec["ratio"] > 1.20:
+        rubs_flags.append({
+            "severity": "MEDIUM",
+            "title":    "Gas allocation may include boiler room or common heat",
+            "detail":   f"At {gas_rec['ratio']:.2f}x EIA, suspect central boiler load being billed through. "
+                        "Valid if tenants have individual thermostats and receive proportional benefit; "
+                        "non-compliant if billing includes common corridors or admin spaces.",
+            "action":   "Confirm heating system type and allocation basis.",
+        })
+
+    # Always-on checks (the boilerplate data requests)
+    baseline_checks = [
+        ("Admin fee stacking", "CO caps recoverable amounts at actual cost. Confirm no flat 'admin fee' or PM markup on bulk invoices."),
+        ("Tenant disclosure", "CO requires written RUBS disclosure at lease signing. Confirm seller has executed disclosures in all tenant files."),
+        ("Vendor rebate capture", "Some PMs keep Xcel or water conservation rebates without passing through. Review vendor credit memos."),
+    ]
+
+    if rubs_flags:
+        for flag in rubs_flags:
+            sc = "#E07B54" if flag["severity"] == "HIGH" else "#D4A843"
+            st.markdown(
+                f'<div class="flag-card" style="border-color:{sc}">'
+                f'<div class="flag-prop">{flag["title"]}</div>'
+                f'<div style="margin-top:6px"><span class="tag" style="background:{sc}22;color:{sc}">{flag["severity"]}</span></div>'
+                f'<div class="flag-detail">{flag["detail"]}<br><br>'
+                f'<b style="color:#8aabcc">→ DD Action:</b> {flag["action"]}'
+                f'</div></div>', unsafe_allow_html=True
+            )
+    else:
+        st.success("No RUBS-specific compliance flags based on utility patterns. Baseline DD checks still apply.")
+
+    with st.expander("Baseline RUBS data requests (always-on)"):
+        for title, detail in baseline_checks:
+            st.markdown(f"**{title}** — {detail}")
+
+    # ── Submetering Retrofit Recommendation ──────────────────────────────────
+    st.markdown('<div class="section-title">Submetering Retrofit — Capex Path</div>', unsafe_allow_html=True)
+    st.caption(
+        "If RUBS allocation is broken, the definitive fix is installing individual submeters so tenants pay their actual consumption. "
+        "For sub-institutional Class B/C, the payback window typically runs 24–36 months on Xcel's Multifamily Energy Efficiency Program (MEEP) rebate."
+    )
+
+    # Per-unit retrofit costs (rule-of-thumb for CO market, net of typical rebates)
+    RETROFIT_COSTS = {"Electric": 450, "Water/Sewer": 350, "Gas": 600}
+    retrofit_plan = []
+    total_retrofit_capex = 0
+    for u in utility_summary:
+        if u["ratio"] > 1.18 and u["utility"] in RETROFIT_COSTS:
+            cost_per_unit = RETROFIT_COSTS[u["utility"]]
+            total_cost    = cost_per_unit * n_units_dd
+            annual_save   = u["annual_exposure"]
+            payback       = (total_cost / annual_save) if annual_save > 0 else float("inf")
+            retrofit_plan.append({
+                "Utility":         u["utility"],
+                "Cost / Unit":     f"${cost_per_unit}",
+                "Total Capex":     f"${total_cost:,.0f}",
+                "Annual Savings":  f"${annual_save:,.0f}",
+                "Payback":         f"{payback:.1f} yrs" if payback != float("inf") else "—",
+            })
+            total_retrofit_capex += total_cost
+
+    if retrofit_plan:
+        st.dataframe(pd.DataFrame(retrofit_plan), use_container_width=True, hide_index=True)
+        st.markdown(
+            f'<div class="rate-banner" style="border-color:#5aaa7a;color:#7fbf8f">'
+            f'💡 <b>Xcel MEEP rebate:</b> This property likely qualifies for Xcel Energy\'s Multifamily Energy Efficiency '
+            f'Program — rebates cover 20–40% of electric submetering capex and HVAC upgrades. '
+            f'Net capex after rebate: <b>~${int(total_retrofit_capex * 0.75):,}</b>. '
+            f'Free money that never shows up in the OM.'
+            f'</div>', unsafe_allow_html=True
+        )
+    else:
+        st.info("No utilities flagged at retrofit threshold (>1.18x). Billing audit alone is sufficient.")
+
     st.markdown('<div class="section-title">Investment Memo Note</div>', unsafe_allow_html=True)
     memo = generate_dd_narrative(prop_name, utility_summary, overall)
     st.markdown(f"_{memo}_")
@@ -561,10 +722,13 @@ elif page == "Acquisition DD":
             help="T-12 effective gross income from the OM."
         )
     with inp3:
+        # Default = retrofit plan net of ~25% Xcel MEEP rebate, or a baseline if no retrofits suggested
+        default_capex = int(total_retrofit_capex * 0.75) if total_retrofit_capex > 0 else int(n_units_dd * 500)
         capex_to_fix = st.number_input(
             "Est. Capex to Fix ($)", min_value=0, max_value=5_000_000,
-            value=int(n_units_dd * 500), step=5_000, format="%d",
-            help="Cost to remediate: re-billing audit, plumbing repair, controls upgrade, etc."
+            value=default_capex, step=5_000, format="%d",
+            help="Auto-populated from the Submetering Retrofit plan above (net of estimated Xcel MEEP rebate). "
+                 "Override with your own bid estimate if you have one."
         )
     with inp4:
         exit_cap = st.number_input(
@@ -729,22 +893,34 @@ elif page == "Acquisition DD":
 
     # ─ TAB 3: Value-Add Return ────────────────────────────────────────────────
     with tab_va:
-        st.caption(
-            "You pay full ask price and fix the issue post-close. Each scenario uses its cap rate as the "
-            "exit/refi rate — bull exits at 4.5%, bear exits at 7%. This shows how market conditions at "
-            "exit amplify or dampen the equity you create from fixing the utility problem."
-        )
-        # Each scenario uses its OWN cap rate as the exit rate (not the shared exit_cap input)
-        va_labels, equity_created, eq_pct, eq_mult_list = [], [], [], []
+        if oz_mode:
+            st.caption(
+                "**Opportunity Zone mode ON.** Each scenario holds 10 years and assumes OZ year-10 "
+                "basis step-up — capital gains on appreciation are forgiven at year 10. The after-tax "
+                "line below shows the OZ advantage over a comparable non-OZ deal assuming a 23.8% "
+                "long-term capital gains + NIIT rate on the non-OZ appreciation."
+            )
+        else:
+            st.caption(
+                "You pay full ask price and fix the issue post-close. Each scenario uses its cap rate as the "
+                "exit/refi rate — bull exits at 4.5%, bear exits at 7%. This shows how market conditions at "
+                "exit amplify or dampen the equity you create from fixing the utility problem."
+            )
+
+        OZ_LTCG_RATE = 0.238  # 20% LTCG + 3.8% NIIT
+        va_labels, equity_created, eq_pct, eq_mult_list, after_tax_delta = [], [], [], [], []
         for sc in scenarios:
-            val_lift   = total_overcharge / sc["cap_rate"]   # value at scenario's exit cap
-            net_uplift = val_lift - capex_to_fix
-            eq_pct_val = (net_uplift / purchase_price * 100) if purchase_price else 0
-            mult_val   = (net_uplift / capex_to_fix) if capex_to_fix > 0 else 0
+            val_lift       = total_overcharge / sc["cap_rate"]
+            net_uplift     = val_lift - capex_to_fix
+            eq_pct_val     = (net_uplift / purchase_price * 100) if purchase_price else 0
+            mult_val       = (net_uplift / capex_to_fix) if capex_to_fix > 0 else 0
+            # OZ advantage: non-OZ pays LTCG on net_uplift; OZ forgives it at year 10
+            oz_advantage   = net_uplift * OZ_LTCG_RATE if net_uplift > 0 else 0
             va_labels.append(sc["label"])
             equity_created.append(max(0, round(net_uplift)))
             eq_pct.append(round(eq_pct_val, 1))
             eq_mult_list.append(round(mult_val, 1))
+            after_tax_delta.append(round(oz_advantage))
 
         fig_va = go.Figure()
         fig_va.add_trace(go.Bar(
@@ -754,6 +930,14 @@ elif page == "Acquisition DD":
             text=[f"${v/1e3:.0f}K" for v in equity_created],
             textposition="outside", textfont=dict(color="#ccc", size=13),
         ))
+        if oz_mode:
+            fig_va.add_trace(go.Bar(
+                name="OZ tax benefit (vs non-OZ, 23.8% LTCG)",
+                x=va_labels, y=after_tax_delta,
+                marker_color="#8aabcc",
+                text=[f"+${v/1e3:.0f}K" for v in after_tax_delta],
+                textposition="outside", textfont=dict(color="#8aabcc", size=12),
+            ))
         fig_va.add_trace(go.Scatter(
             name="% of ask price",
             x=va_labels, y=eq_pct, mode="lines+markers+text",
@@ -764,6 +948,7 @@ elif page == "Acquisition DD":
             yaxis="y2",
         ))
         fig_va.update_layout(
+            barmode="group" if oz_mode else "stack",
             paper_bgcolor="#0f1117", plot_bgcolor="#0f1117",
             font=dict(color="#aaa", size=12),
             legend=dict(bgcolor="#1a1d27", font=dict(size=11)),
@@ -772,16 +957,19 @@ elif page == "Acquisition DD":
                        tickprefix="$", tickformat=",.0f"),
             yaxis2=dict(overlaying="y", side="right", title="% of Ask Price",
                         ticksuffix="%", showgrid=False, color="#5aaa7a"),
-            height=300, margin=dict(l=0, r=0, t=20, b=0),
+            height=320, margin=dict(l=0, r=0, t=20, b=0),
         )
         st.plotly_chart(fig_va, use_container_width=True)
 
         va_cols = st.columns(len(scenarios))
-        for col, sc, eq, pct, mult in zip(va_cols, scenarios, equity_created, eq_pct, eq_mult_list):
+        for col, sc, eq, pct, mult, oz_adv in zip(va_cols, scenarios, equity_created, eq_pct, eq_mult_list, after_tax_delta):
             roi_txt       = f"{mult:.1f}x on fix spend" if capex_to_fix > 0 else "Pure NOI play — no capex"
             sc_color      = sc["color"]
             sc_cap_label  = f'{sc["cap_rate"]*100:.1f}% cap'
             sc_exit_val   = f'${total_overcharge/sc["cap_rate"]:,.0f}'
+            oz_line       = (f'<b style="color:#8aabcc">OZ tax benefit:</b> +${oz_adv:,.0f}<br>'
+                             f'<b style="color:#8aabcc">Total OZ equity:</b> ${eq + oz_adv:,.0f}<br>'
+                             if oz_mode else "")
             with col:
                 st.markdown(
                     f'<div class="kpi-card" style="border-color:{sc_color}">'
@@ -791,9 +979,17 @@ elif page == "Acquisition DD":
                     f'<b>Value at exit:</b> {sc_exit_val}<br>'
                     f'<b>Capex to fix:</b> −${capex_to_fix:,.0f}<br>'
                     f'<b>Net equity:</b> <span style="color:{sc_color}">${eq:,.0f}</span><br>'
+                    f'{oz_line}'
                     f'<b>% of ask:</b> {pct:.1f}%<br>'
                     f'<b>{roi_txt}</b>'
                     f'</div></div>', unsafe_allow_html=True)
+
+        if oz_mode:
+            st.caption(
+                "_Note: this is simplified OZ math — real OZ analysis includes the deferred gain from the "
+                "original rolled-in investment, 10% basis step-up at year 5 (for pre-2022 rollovers), and "
+                "the substantial improvement test. Use this as directional only, not for tax filings._"
+            )
 
     # ── OM vs. Corrected comparison ───────────────────────────────────────────
     st.markdown('<div class="section-title">OM Financials vs. Corrected (Base Case)</div>', unsafe_allow_html=True)
@@ -841,6 +1037,61 @@ elif page == "Acquisition DD":
         use_container_width=True, hide_index=True,
     )
 
+    # ── Agency Debt Qualifying (Fannie SBL) ───────────────────────────────────
+    if agency_mode:
+        st.markdown('<div class="section-title">Agency Debt Qualifying — Fannie SBL</div>', unsafe_allow_html=True)
+        st.caption(
+            "Fannie Mae Small Balance Loan (up to $7.5M) requires minimum 1.25x DSCR on T-12 NOI. "
+            "Inflated OpEx can push a deal out of best-tier pricing or into DSCR shortfall — "
+            "meaning the utility billing issue has a direct financing cost, not just a valuation cost."
+        )
+
+        ltv_assumed      = 0.65
+        coupon_assumed   = 0.055
+        amort_years      = 30
+        loan_amount      = purchase_price * ltv_assumed
+        # Monthly amortizing payment
+        r_m              = coupon_assumed / 12
+        n_pmt            = amort_years * 12
+        monthly_pmt      = loan_amount * (r_m * (1 + r_m) ** n_pmt) / ((1 + r_m) ** n_pmt - 1) if r_m > 0 else loan_amount / n_pmt
+        annual_ds        = monthly_pmt * 12
+        dscr_om          = om_noi / annual_ds if annual_ds > 0 else 0
+        dscr_corrected   = corr_noi / annual_ds if annual_ds > 0 else 0
+        min_dscr         = 1.25
+        # Max loan at corrected NOI maintaining 1.25x DSCR (constrained)
+        max_ds_corrected = corr_noi / min_dscr if min_dscr > 0 else 0
+        # Back-solve max loan from max_ds_corrected
+        pmt_factor       = (r_m * (1 + r_m) ** n_pmt) / ((1 + r_m) ** n_pmt - 1) if r_m > 0 else 1 / n_pmt
+        max_loan_corr    = (max_ds_corrected / 12) / pmt_factor
+        loan_gap         = max(0, loan_amount - max_loan_corr)
+
+        dc1, dc2, dc3, dc4 = st.columns(4)
+        dc1.metric("Proposed Loan (65% LTV)", f"${loan_amount:,.0f}", f"{coupon_assumed*100:.2f}% · 30yr")
+        dc2.metric("Annual Debt Service", f"${annual_ds:,.0f}")
+        dscr_delta_txt = f"{(dscr_corrected - dscr_om):+.2f}x vs OM"
+        dc3.metric("DSCR at OM NOI", f"{dscr_om:.2f}x",
+                   delta=f"min required: {min_dscr:.2f}x",
+                   delta_color="off")
+        dc4.metric("DSCR at Corrected NOI", f"{dscr_corrected:.2f}x",
+                   delta=dscr_delta_txt,
+                   delta_color="inverse" if dscr_corrected < min_dscr else "normal")
+
+        if dscr_corrected < min_dscr:
+            st.markdown(
+                f'<div class="rate-banner" style="border-color:#E07B54;color:#E07B54">'
+                f'⚠ <b>Agency qualifying risk:</b> At corrected NOI, DSCR falls to {dscr_corrected:.2f}x — below '
+                f'the 1.25x Fannie SBL minimum. Either reduce loan proceeds by <b>~${loan_gap:,.0f}</b> '
+                f'(requiring more equity), accept worse pricing, or negotiate the price down to restore DSCR.'
+                f'</div>', unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                f'<div class="rate-banner" style="border-color:#5aaa7a;color:#7fbf8f">'
+                f'✓ <b>Deal still qualifies post-correction</b> at {dscr_corrected:.2f}x DSCR. Agency terms are safe, '
+                f'but the thinner coverage may move the deal out of best-tier pricing — worth shopping alternative lenders.'
+                f'</div>', unsafe_allow_html=True
+            )
+
     # ── Negotiating Leverage Callout ──────────────────────────────────────────
     neg_reduction = base_drag
     neg_pct       = (neg_reduction / purchase_price * 100) if purchase_price else 0
@@ -872,3 +1123,128 @@ elif page == "Acquisition DD":
         st.markdown("**Stabilized benchmarks for UW model**")
         for u in utility_summary:
             st.markdown(f"- {u['utility']}: ${u['benchmark']:.0f}/unit/mo (EIA CO)")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ABOUT THE BUILD
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "About the Build":
+    st.markdown("## Why I built this")
+    st.markdown(
+        '<div style="color:#8a8f9e;font-size:0.95rem;margin-bottom:24px;line-height:1.7">'
+        'A quick note from Luke Cunningham on the thinking behind AM Watchdog — and why I\'d be '
+        'a strong addition to your asset management team.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("### The thesis")
+    st.markdown(
+        "Sub-institutional Class B/C multifamily in Denver — 10 to 100 unit deals — is one of the "
+        "best risk-adjusted corners of real estate right now. But it's also the corner where the "
+        "back office is thinnest. The big REITs have teams auditing every invoice. GPs at your scale "
+        "don't, and the gap shows up in small leaks that compound: a RUBS allocation that quietly "
+        "includes common-area load, a water bill drifting 15% above the benchmark because of a slab "
+        "leak nobody called in, a PM company whose billing you inherited at acquisition and never "
+        "re-baselined."
+    )
+    st.markdown(
+        "AM Watchdog is the tool I wish existed on the operator side. It watches every utility bill "
+        "across the portfolio against published EIA Colorado benchmarks, flags the ones that don't "
+        "make sense, and attaches a dollar figure to each one. And at acquisition, it runs the same "
+        "check on the target property so you walk into LOI negotiations knowing exactly how much "
+        "of the asking price is built on a fictional OpEx baseline."
+    )
+
+    st.markdown("### Why this matters to your NOI")
+    st.markdown(
+        "The demo deal in this app surfaces about **$52K a year** in utility overcharges on a single "
+        "80-unit Class B property. At a 5.5% cap rate, that's roughly **$950K of value** — call it "
+        "~6% of the purchase price. That's not a rounding error. That's the difference between a "
+        "deal that pencils and one that doesn't, and it's the kind of finding that pays for an "
+        "asset manager many times over in the first year."
+    )
+    st.markdown(
+        "The tool also models how those savings flow through the three valuation lenses a value-add "
+        "buyer actually uses — direct cap, GRM, and stabilized yield-on-cost — so the conversation "
+        "with lenders and LPs is grounded in numbers they recognize."
+    )
+
+    st.markdown("### What's inside the app")
+    st.markdown(
+        '<div style="background:#1a1d27;border-left:3px solid #5a7aaa;padding:14px 18px;margin:10px 0;border-radius:4px">'
+        '<b style="color:#8aabcc">Portfolio watchdog</b><br>'
+        '<span style="color:#aab;font-size:0.92rem">Every utility bill, every property, every month — '
+        'scored against Colorado state benchmarks and against the property\'s own history. A PM quality '
+        'panel ranks your property managers by flag rate so you can spot the one that keeps showing up '
+        'before it becomes a conversation at the annual meeting.</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div style="background:#1a1d27;border-left:3px solid #5a7aaa;padding:14px 18px;margin:10px 0;border-radius:4px">'
+        '<b style="color:#8aabcc">Acquisition due diligence</b><br>'
+        '<span style="color:#aab;font-size:0.92rem">Drop in the seller\'s T-12 utility data and see '
+        'exactly where the pro forma is soft. The tool flags overcharges, translates them into price '
+        'reductions at your target cap rate, and drafts the negotiating angle — escrow holdback, price '
+        'cut, or both.</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div style="background:#1a1d27;border-left:3px solid #5a7aaa;padding:14px 18px;margin:10px 0;border-radius:4px">'
+        '<b style="color:#8aabcc">Denver Class B/C thesis layer</b><br>'
+        '<span style="color:#aab;font-size:0.92rem">The details that actually move the needle for this '
+        'buyer profile: Colorado RUBS compliance screening, Xcel MEEP rebate math on submetering '
+        'retrofits, Opportunity Zone tax treatment on the 10-year hold, and Fannie Small Balance Loan '
+        'DSCR qualifying. Each one is a toggle — turn on what applies to the deal in front of you.</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div style="background:#1a1d27;border-left:3px solid #5a7aaa;padding:14px 18px;margin:10px 0;border-radius:4px">'
+        '<b style="color:#8aabcc">Maintenance signal, not just pricing</b><br>'
+        '<span style="color:#aab;font-size:0.92rem">When water bills drift upward for three months in '
+        'a row, that\'s usually not the utility company — that\'s a slab leak or a running toilet bank. '
+        'The tool escalates these patterns to a maintenance flag before they become a capital expense.</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("### How I think about the work")
+    st.markdown(
+        "Every flag in this tool has a reason and a dollar attached to it. I don't believe in "
+        "dashboards that just display data — I build tools that end in a decision. Should we call "
+        "the PM company this week? Should we ask for a $950K price reduction? Should we submeter "
+        "the electric at next refinance? The answer should be on the screen, not three pivot tables "
+        "away."
+    )
+    st.markdown(
+        "I'm comfortable in the underwriting model, comfortable on the property walk, and comfortable "
+        "building the tool that connects the two. I taught myself to code specifically so that the "
+        "ideas I had about asset management wouldn't be stuck waiting on someone else's roadmap. "
+        "What you're looking at is one weekend of that mindset applied to a real problem I've seen "
+        "on real deals."
+    )
+
+    st.markdown("### What I'd do on day one")
+    st.markdown(
+        "Plug this into your live utility data, baseline every property in the portfolio against EIA, "
+        "and walk into the next investment committee with a ranked list of the top ten dollar-weighted "
+        "fixes across the book. Then do the same exercise on every property under LOI — before close, "
+        "not after."
+    )
+
+    st.markdown(
+        '<div style="background:#14161e;border:1px solid #2a2d3a;border-radius:6px;'
+        'padding:18px 22px;margin:28px 0 8px 0;font-size:0.9rem;color:#aab;line-height:1.7">'
+        '<b style="color:#e8e8e8">Luke Cunningham</b><br>'
+        '<span style="color:#8a8f9e">lukas.p.cunningham@gmail.com</span><br><br>'
+        'Happy to walk through the tool live, adapt it to your portfolio, or pressure-test the '
+        'thesis on any deal in your pipeline. The fastest way to see if this is a fit is to put '
+        'a real T-12 through the DD page and see what shakes out.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
